@@ -7,8 +7,8 @@ Simple script to pull &amp; compile comics from Webtoons. Downloads all episodes
 ### Flags
 * `-h` or `--help` - Show help
 * `--dir` - Specify output directory
-* `--start` - Specify starting episode (inclusive)
-* `--end` - Specify ending episode (inclusive)
+* `--from` - Specify starting episode (inclusive)
+* `--to` - Specify ending episode (inclusive)
 * `--no-compile` - Don't compile panels into single images
 * `--no-confirm` - Don't confirm before downloading or overwriting files
 * `--zip` - Zip images after downloading
