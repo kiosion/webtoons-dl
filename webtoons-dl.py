@@ -15,9 +15,11 @@ from multiprocessing import Pool
 # Default download dir is '~/webtoons-dl'
 download_dir = os.path.expanduser('~/webtoons-dl')
 comic_title = None
+no_confirm = False
+no_compile = False
 
 
-def find_episode_urls(url):
+def find_episode_urls(url, start=None, end=None):
     global download_dir
     global comic_title
 
@@ -33,7 +35,7 @@ def find_episode_urls(url):
     comic_title = _comic_title
 
     if comic_title is None:
-        print('Could not find comic title, exiting...')
+        print('Error: Could not find comic title')
         return
 
     download_dir = os.path.join(download_dir, comic_title)
@@ -42,8 +44,9 @@ def find_episode_urls(url):
     page_links = pagination.find_all('a')
 
     data = []
+    filter = []
     for page in range(len(page_links), 0, -1):
-        print(f'Getting episode list for page {page}...')
+        print(f'Getting episode list for page {page}...', end='\r')
 
         url = page_links[page - 1]['href']
         if url == '#':
@@ -53,7 +56,12 @@ def find_episode_urls(url):
         episodes = get_episode_list(url)
         data.extend(episodes)
 
-    return data
+    if start is not None or end is not None:
+        filter = [e for e in data if start <= int(e[0]) <= end]
+    else:
+        filter = data
+
+    return [filter, data]
 
 
 def get_episode_list(url):
@@ -78,6 +86,8 @@ def get_episode_list(url):
 
 
 def get_episode_images(url):
+    global no_compile
+
     # Download all images for given episode URL
     print(f'Fetching images from {url}...')
 
@@ -96,10 +106,10 @@ def get_episode_images(url):
         if r.status_code != 200:
             r.raise_for_status()
 
-        pil_image = Image.open(BytesIO(r.content))
+        pil_image = Image.open(BytesIO(r.content)).convert('RGB')
         data.append(pil_image)
 
-    return stitch_images(data)
+    return data if no_compile else stitch_images(data)
 
 
 def batch_images(episodes, max_pool_size):
@@ -115,40 +125,97 @@ def batch_images(episodes, max_pool_size):
 
 def download_episodes(episodes):
     global download_dir
+    global comic_title
+    global no_confirm
+
+    _episodes = episodes[1]
+    _filter = episodes[0]
 
     if not os.path.exists(download_dir):
         os.makedirs(download_dir)
     elif not os.path.isdir(download_dir):
-        print('Invalid download directory, exiting...')
+        print('Error: Invalid download directory')
         return
 
-    print(f'Ready to download {len(episodes)} episodes to {download_dir}')
-    print('Press enter to continue...')
-    input()
+    dl_msg = ''
+    if len(_filter) != len(_episodes):
+        dl_msg = f"""Ready to download {len(_filter)} episodes
+                     (out of {len(_episodes)}) to \"{download_dir}\""""
+    else:
+        dl_msg = f'Ready to download {len(_filter)} episodes to {download_dir}'
+    print(re.sub(r'\s+', ' ', dl_msg))
+    if not no_confirm:
+        print('Press enter to continue...')
+        input()
 
     max_batch_size = min(8, int(os.cpu_count() / 2))
 
     try:
-        for i in range(0, len(episodes), max_batch_size):
-            batch = episodes[i:i + max_batch_size]
+        for i in range(0, len(_filter), max_batch_size):
+            batch = _filter[i:i + max_batch_size]
             images = batch_images(batch, max_batch_size)
 
             for j, image in enumerate(images):
-                clean_name = re.sub(r'\s+', ' ', batch[j][1].strip())
-                clean_name = re.sub(
-                    r'[^a-zA-Z0-9\s\-\_\.\(\)\#]+', '', clean_name
-                )
+                # If no_compile is True, 'image' will be a list of individual
+                # panels. Otherwise, it will be a single stitched image
+                if no_compile:
+                    for k, panel in enumerate(image[::-1]):
+                        clean_name = re.sub(r'\s+', ' ', batch[j][1].strip())
+                        clean_name = re.sub(
+                            r'[^a-zA-Z0-9\s\-\_\.\(\)\#]+', '', clean_name
+                        )
 
-                filename = os.path.join(
-                    download_dir, f'{batch[j][0]}. {clean_name}.jpg'
-                )
+                        episode_dir = os.path.join(
+                            download_dir, f'{batch[j][0]}. {clean_name}'
+                        )
+                        if not os.path.exists(episode_dir):
+                            os.makedirs(episode_dir)
 
-                image.save(filename, 'JPEG')
-                print(f'Saved "{filename}"')
+                        filename = os.path.join(
+                            episode_dir, f'{k + 1}.jpg'
+                        )
+
+                        if not confirm_overwrite(filename):
+                            continue
+
+                        panel.save(filename, 'JPEG')
+                        print(f'Saved "{filename}"')
+                else:
+                    clean_name = re.sub(r'\s+', ' ', batch[j][1].strip())
+                    clean_name = re.sub(
+                        r'[^a-zA-Z0-9\s\-\_\.\(\)\#]+', '', clean_name
+                    )
+
+                    filename = os.path.join(
+                        download_dir, f'{batch[j][0]}. {clean_name}.jpg'
+                    )
+
+                    if not confirm_overwrite(filename):
+                        continue
+
+                    image.save(filename, 'JPEG')
+                    print(f'Saved "{filename}"')
+
     except Exception as e:
-        print('Error downloading images, exiting...')
+        print('Error: Error downloading images')
         print(e)
         return
+
+
+def confirm_overwrite(filename):
+    global no_confirm
+
+    if os.path.exists(filename) and not no_confirm:
+        print(f'\nFile "{filename}" already exists')
+        print('Overwrite? (Y/n)', end=' ')
+        overwrite = input()
+        if overwrite != '' and overwrite.lower() != 'y':
+            print('Skipping...')
+            return False
+        else:
+            print('\033[F\033[K\033[F\033[K', end='\r')
+
+    return True
 
 
 def stitch_images(images):
@@ -183,16 +250,45 @@ def zip_images():
 
 def main():
     global download_dir
+    global no_confirm
+    global no_compile
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--url', help='URL of webtoon to download')
     parser.add_argument('url', nargs='?', help='URL of webtoon to download')
     parser.add_argument('--dir', help='Directory to save images to')
-    parser.add_argument('--zip', help='Zip images into single file when done')
+    parser.add_argument(
+        '--zip',
+        help='Zip images into single file when done',
+        action=argparse.BooleanOptionalAction
+    )
+    parser.add_argument(
+        '--no-confirm',
+        help='Skip confirmation prompts',
+        action=argparse.BooleanOptionalAction
+    )
+    parser.add_argument(
+        '--from',
+        dest='_from',
+        help='Episode to start downloading from (inclusive)'
+    )
+    parser.add_argument(
+        '--to', help='Episode to stop downloading at (inclusive)'
+    )
+    parser.add_argument(
+        '--no-compile',
+        help='Do not compile images into a single image',
+        action=argparse.BooleanOptionalAction
+    )
     args = parser.parse_args()
 
     url = args.url
     dir = args.dir
+    no_confirm = None if args.no_confirm is None else True
+    no_compile = None if args.no_compile is None else True
+
+    _from = None if args._from is None else int(args._from)
+    to = None if args.to is None else int(args.to)
 
     if dir is None:
         print(f'No directory provided, defaulting to "{download_dir}"...')
@@ -204,29 +300,29 @@ def main():
                                (?:title_no|.*?&title_no)=\d+.*""", re.X)
 
     if not re.match(valid_url, url):
-        print('Invalid URL provided - URL should be of the form:')
+        print('Error: Invalid URL provided - URL should be of the form:')
         print(
             'https://www.webtoons.com/en/genre/comic-title/list?title_no=0000'
         )
         return
 
     try:
-        episodes = find_episode_urls(url)
+        episodes = find_episode_urls(url, start=_from, end=to)
     except Exception as e:
-        print(f'Uncaught error: {e}')
+        print(f'Error: Uncaught error: {e}')
         return
 
     try:
         result = download_episodes(episodes)
     except Exception as e:
-        print(f'Uncaught error: {e}')
+        print(f'Error: Uncaught error: {e}')
         return
 
     if result and args.zip:
         print('Zipping images...')
         zip_images()
 
-    print('Done!')
+    print('\nDone!')
 
 
 if __name__ == '__main__':
